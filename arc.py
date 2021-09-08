@@ -3,8 +3,15 @@ import matplotlib as mpl
 import numpy as np
 import json
 import os
+import torch
 
 def load_arc_ios(num, tasks_dir='tasks_json'):
+    """
+    load ARC IO examples + test IO from LARC data
+    :param num: task number
+    :param tasks_dir: directory to LARC data
+    :return: ([(io1_in, io1_out), (io2_in, io2_out), ...], (io_test_in, io_test_out))
+    """
     with open(os.path.join(tasks_dir, f'{num}.json'), 'r') as f:
         task = json.load(f)
 
@@ -43,9 +50,9 @@ def show_arc_grid(grid, ax=None, save_dir=None, show=False):
     """show/save images of an arc grid"""
     if ax is None:
         fig, ax = plt.subplots()
-    colors = ['black', 'blue', 'red', 'green', 'yellow', 'gray', 'purple', 'orange', 'teal', 'brown', 'white']
+    colors = ['black', 'blue', 'red', 'green', 'yellow', 'gray', 'purple', 'orange', 'teal', 'brown', 'white', 'lightgray']
     colormap = mpl.colors.ListedColormap(colors)
-    bounds = list(range(11))
+    bounds = list(range(12))
     norm = mpl.colors.BoundaryNorm(bounds, colormap.N)
     ax.imshow(grid, cmap=colormap, norm=norm)
 
