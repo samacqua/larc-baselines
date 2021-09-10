@@ -46,12 +46,12 @@ def gen_larc_descs(larc_path, min_suc=0.1, tasks_subset=None):
         io_test = (task['test'][0]['input'], task['test'][0]['output'])
 
         # yield for each description that meets criterion
-        for desc in task['descriptions'].values():
-            num_suc = len([build for build in desc['builds'].values() if build['success']])
-            num_tot = len(desc['builds'].values())
+        for desc_id, desc_obj in task['descriptions'].items():
+            num_suc = len([build for build in desc_obj['builds'].values() if build['success']])
+            num_tot = len(desc_obj['builds'].values())
 
             if num_tot > 0 and num_suc / num_tot >= min_suc:  # tot > 0 to avoid / 0
-                yield {'io_grids': io_exs, 'test': io_test, 'desc': desc['do_description'],
+                yield {'io_grids': io_exs, 'test': io_test, 'desc': desc_obj, 'desc_id': desc_id,
                        'num': task['num'], 'name': task['name']}
 
 
@@ -90,12 +90,13 @@ def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, t
         new_task['io_grids'] = new_ios
 
         # pad test input
+        new_task['output_size'] = len(larc_pred_task['test'][1]), len(larc_pred_task['test'][1][0])
         new_task['test'] = tuple(pad_grid(grid, resize) \
             if resize is not None else np.array(grid) for grid in larc_pred_task['test'])
         new_task['test_in'] = arc2torch(new_task['test'][0])
 
         # tokenize description
-        new_task['desc_tokens'] = {k: torch.tensor(v) for k, v in tokenizer.encode_plus(larc_pred_task['desc']).items()}
+        new_task['desc_tokens'] = {k: torch.tensor(v) for k, v in tokenizer.encode_plus(larc_pred_task['desc']['do_description']).items()}
 
         yield new_task
 
@@ -199,6 +200,6 @@ if __name__ == '__main__':
     ds = LARCDataset('larc', tasks_subset=[1])
     for t in ds:
         print(t.keys())
-    larc_train_dataset = LARCSingleCellDataset('larc', tasks_subset=[1], resize=(30, 30))
+    # larc_train_dataset = LARCSingleCellDataset('larc', tasks_subset=[1], resize=(30, 30))
     # for t in larc_train_dataset:
     #     print(t.keys())
