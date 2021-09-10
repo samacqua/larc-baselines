@@ -5,7 +5,7 @@ import json
 import os
 import torch
 
-def load_arc_ios(num, tasks_dir='tasks_json'):
+def load_arc_ios(num, tasks_dir='larc'):
     """
     load ARC IO examples + test IO from LARC data
     :param num: task number

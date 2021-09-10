@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from arc import show_arc_task, load_arc_ios
-from larc_dataset import LARC_Cell_Dataset
+from larc_dataset import LARCSingleCellDataset
 from larc_encoder import LARCEncoder
 
 import pickle
@@ -166,8 +166,8 @@ if __name__ == '__main__':
     # =======================
 
     predictor = PredictCell()
-    tasks_dir = 'tasks_json'
-    larc_train_dataset = LARC_Cell_Dataset(tasks_dir, tasks_subset=[1], resize=(30, 30))
+    tasks_dir = 'larc'
+    larc_train_dataset = LARCSingleCellDataset(tasks_dir, tasks_subset=[1], resize=(30, 30))
     # predictor = torch.from
     train(predictor, larc_train_dataset, num_epochs=50)
     test(predictor, larc_train_dataset)
@@ -187,7 +187,7 @@ if __name__ == '__main__':
     # =================================
 
     # predictor = PredictCell()
-    # tasks_dir = 'tasks_json'
+    # tasks_dir = 'larc'
     # larc_train_dataset = LARC_Cell_Dataset(tasks_dir, tasks_subset=train_data, max_tasks=200)
     # train(predictor, larc_train_dataset, num_epochs=50)
 
