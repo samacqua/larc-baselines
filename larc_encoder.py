@@ -15,7 +15,7 @@ class LARCEncoder(nn.Module):
         super().__init__()
 
         # grid encoder
-        # 30x30x11 --> 256
+        # Bx30x30x11 --> Bx256
         self.encoder = nn.Sequential(
             nn.Conv2d(11, 16, 3, stride=2, padding=1),
             nn.ReLU(),
@@ -26,7 +26,7 @@ class LARCEncoder(nn.Module):
         )
 
         # input vs. output embedding
-        # 256 --> 128
+        # Bx256 --> Bx128
         self.in_encoder = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -37,21 +37,21 @@ class LARCEncoder(nn.Module):
         )
 
         # example embedding
-        # 256 --> 64
+        # Bx256 --> Bx64
         self.ex_encoder = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(),
         )
 
         # test input embedding
-        # 256 --> 64
+        # Bx256 --> Bx64
         self.test_in_embedding = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(),
         )
 
         # natural language description encoding
-        # nl --> 64
+        # BxNL --> Bx64
         self.bert = BertModel.from_pretrained("bert-base-uncased")
         self.bert.requires_grad_(False)
         self.bert_resize = nn.Sequential(
@@ -60,8 +60,8 @@ class LARCEncoder(nn.Module):
         )
 
         # transformer
-        # 5x64 --> 5x64
-        encoder_layer = nn.TransformerEncoderLayer(d_model=5, nhead=5)
+        # Bx5x64 --> Bx5x64
+        encoder_layer = nn.TransformerEncoderLayer(d_model=5, nhead=5, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=6)
 
     def forward(self, io_grids, test_in, desc_tokens):
@@ -81,7 +81,7 @@ class LARCEncoder(nn.Module):
         transformer_input.append(self.bert_resize(self.bert(**desc_tokens)['pooler_output']))
 
         # concatenate all inputs and run through transformer
-        t_in = torch.transpose(torch.cat(transformer_input, dim=0), 0, 1).unsqueeze(0)
+        t_in = torch.stack(transformer_input).permute(1, 2, 0)
         t_out = self.transformer(t_in)
 
         return t_out

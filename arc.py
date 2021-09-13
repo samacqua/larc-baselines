@@ -31,6 +31,7 @@ def load_arc_ios(num, tasks_dir='larc'):
 def show_arc_task(ios, name='', save_dir=None, show=False):
     """show/save images of a collection of arc input-outputs"""
     # make subplots
+    plt.clf()
     fig, ax = plt.subplots(len(ios), 2, figsize=(5, len(ios)*2))
 
     # show each grid

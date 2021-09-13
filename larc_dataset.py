@@ -9,7 +9,7 @@ PAD_VAL = 10
 
 
 def onehot_initialization(a, num_cats):
-    """https://stackoverflow.com/questions/36960320/convert-a-2d-matrix-to-a-3d-one-hot-matrix-numpy"""
+    """assumes a is np array. https://stackoverflow.com/questions/36960320/convert-a-2d-matrix-to-a-3d-one-hot-matrix-numpy"""
     out = np.zeros((a.size, num_cats), dtype=np.uint8)  # initialize correct size 3-d tensor of 0s
     out[np.arange(a.size),a.ravel()] = 1
     out.shape = a.shape + (num_cats,)
@@ -17,18 +17,35 @@ def onehot_initialization(a, num_cats):
 
 
 def arc2torch(grid, num_cats=11):
-    """convert 2-d grid of original arc format to 3-d one-hot encoded tensor"""
+    """assumes grid is numpy array. convert 2-d grid of original arc format to 3-d one-hot encoded tensor"""
     grid = onehot_initialization(grid, num_cats)
     grid = np.rollaxis(grid, 2)
     return torch.from_numpy(grid).float()
 
 
 def pad_grid(grid, new_shape, pad_val=PAD_VAL):
-    """pad an arc grid"""
+    """pad an arc grid (list)"""
     grid = np.array(grid)
     grid_padded = np.full(new_shape, pad_val)
     grid_padded[:grid.shape[0], :grid.shape[1]] = grid
     return grid_padded
+
+
+def gen_larc_tasks(larc_path, tasks_subset=None):
+    """
+    generator of LARC tasks
+    :param larc_path: path to folder with LARC data
+    :param tasks_subset: subset of tasks to include (number of task). If None, will use whole dataset.
+    :yields: LARC task dictionary
+    """
+
+    tasks_subset = set(range(400)) if tasks_subset is None else tasks_subset    # if unspecified, use all tasks
+
+    for task_num in tasks_subset:
+        fpath = os.path.join(larc_path, f'{task_num}.json')
+
+        with open(fpath, 'r') as f:
+            yield {**json.load(f), 'num': task_num}
 
 
 def gen_larc_descs(larc_path, min_suc=0.1, tasks_subset=None):
@@ -57,7 +74,8 @@ def gen_larc_descs(larc_path, min_suc=0.1, tasks_subset=None):
 
 def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, tasks_subset=None):
     """
-    generate LARC descriptions with more constraints for pytorch format
+    generate LARC descriptions with more constraints for pytorch format. turns 2-d arc grids to one-hot encoded tensors.
+        pads ARC grids, ensures same number example IOs per task.
     :param larc_path: path to folder with LARC data
     :param min_suc: min fraction of successful builds to include in dataset
     :param tasks_subset: subset of tasks to include (number of task). If None, will use whole dataset.
@@ -65,7 +83,6 @@ def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, t
     """
 
     tasks_subset = set(tasks_subset) if tasks_subset is not None else None  # for O(1) checks
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
     # pad all grids with 10s to make same size
     for i, larc_pred_task in enumerate(gen_larc_descs(larc_path, min_suc=min_suc, tasks_subset=tasks_subset)):
@@ -89,33 +106,13 @@ def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, t
                          arc2torch(np.full((1, 1), PAD_VAL))) for _ in range(num_ios - len(new_ios))]
         new_task['io_grids'] = new_ios
 
-        # pad test input
+        # pad test IO
         new_task['output_size'] = len(larc_pred_task['test'][1]), len(larc_pred_task['test'][1][0])
-        new_task['test'] = tuple(pad_grid(grid, resize) \
-            if resize is not None else np.array(grid) for grid in larc_pred_task['test'])
-        new_task['test_in'] = arc2torch(new_task['test'][0])
-
-        # tokenize description
-        new_task['desc_tokens'] = {k: torch.tensor(v) for k, v in tokenizer.encode_plus(larc_pred_task['desc']['do_description']).items()}
+        test_in, test_out = larc_pred_task['test']
+        new_task['test'] = (arc2torch(np.array(test_in)), torch.tensor(test_out)) if resize is None \
+                      else (arc2torch(pad_grid(test_in, resize)), torch.tensor(pad_grid(test_out, resize)))
 
         yield new_task
-
-
-def gen_larc_tasks(larc_path, tasks_subset=None):
-    """
-    generator of LARC tasks
-    :param larc_path: path to folder with LARC data
-    :param tasks_subset: subset of tasks to include (number of task). If None, will use whole dataset.
-    :yields: LARC task dictionary
-    """
-
-    tasks_subset = set(range(400)) if tasks_subset is None else tasks_subset    # if unspecified, use all tasks
-
-    for task_num in tasks_subset:
-        fpath = os.path.join(larc_path, f'{task_num}.json')
-
-        with open(fpath, 'r') as f:
-            yield {**json.load(f), 'num': task_num}
 
 
 class LARCSingleCellDataset(Dataset):
@@ -139,7 +136,7 @@ class LARCSingleCellDataset(Dataset):
             if i >= max_tasks:
                 break
 
-            num_cats, w, h = larc_pred_task['test_in'].shape
+            num_cats, w, h = larc_pred_task['test'][0].shape
             for x in range(w):
                 for y in range(h):
                     # 1-hot x and y
@@ -177,6 +174,7 @@ class LARCDataset(Dataset):
             max_tasks: maximum number of tasks to load
         """
         self.tasks = []
+
         for i, larc_pred_task in enumerate(gen_larc_descs_pytorch(larc_path, num_ios=num_ios, resize=resize,
                                                                   min_suc=0.1, tasks_subset=tasks_subset)):
 
@@ -196,10 +194,43 @@ class LARCDataset(Dataset):
         return self.tasks[idx]
 
 
+def larc_collate(batch):
+    r"""Puts each data field into a tensor with outer dimension batch size"""
+
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+    # get all data together
+    io_grids, test_in, test_out, descs, metadata = [([], []), ([], []), ([], [])], [], [], [], []
+    for b in batch:
+
+        # add IO input and output
+        for i in range(3):
+            io_grids[i][0].append(b['io_grids'][i][0])
+            io_grids[i][1].append(b['io_grids'][i][1])
+
+        # add test IO
+        test_in.append(b['test'][0])
+        test_out.append(b['test'][1])
+
+        # add desc tokens
+        descs.append(b['desc']['do_description'])
+
+        # store metadata
+        metadata.append({'num': b['num'], 'desc_id': b['desc_id']})
+
+    # convert to tensors
+    io_grids = [(torch.stack(io_grids[i][0]), torch.stack(io_grids[i][1])) for i in range(3)]
+    test_in = torch.stack(test_in)
+    test_out = torch.stack(test_out)
+    desc_tokens = {k: torch.tensor(v) for k, v in tokenizer.batch_encode_plus(descs, padding=True).items()}
+
+    return {'io_grids': io_grids, 'test_in': test_in, 'test_out': test_out, 'desc_tokens': desc_tokens, 'metadata': metadata}
+
+
 if __name__ == '__main__':
-    ds = LARCDataset('larc', tasks_subset=[1])
-    for t in ds:
+    ds = LARCDataset('larc', max_tasks=6)
+
+    from torch.utils.data import DataLoader
+    dl = DataLoader(ds, batch_size=2, collate_fn=larc_collate)
+    for t in dl:
         print(t.keys())
-    # larc_train_dataset = LARCSingleCellDataset('larc', tasks_subset=[1], resize=(30, 30))
-    # for t in larc_train_dataset:
-    #     print(t.keys())
