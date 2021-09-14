@@ -1,3 +1,5 @@
+"""equivalent Google Colab notebook: https://colab.research.google.com/drive/1sFceEw0nrNjiOGiPFAb2KpnxK7kdpvDL?usp=sharing"""
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -11,7 +13,7 @@ from tqdm import tqdm
 import numpy as np
 import pickle
 
-NO_PRED_VAL = 11
+NO_PRED_VAL = 10
 
 class DeconvNet(nn.Module):
     def __init__(self):
@@ -48,7 +50,7 @@ class PredictGrid(nn.Module):
 
         # run grids + desc through encoder
         embedding = self.encoder(io_grids, test_in, desc_tokens)
-        embedding = torch.max(embedding, dim=2)[1].view(-1, 1, 8, 8).type(torch.FloatTensor)
+        embedding = torch.max(embedding, dim=2)[1].view(-1, 1, 8, 8).type(torch.FloatTensor).to(DEVICE)
 
         # run thru decoder
         pred = self.decoder(embedding)
@@ -56,12 +58,22 @@ class PredictGrid(nn.Module):
         return pred
 
 
+def data_to_device(t, device):
+    """put larc dataset data on given device"""
+    t['io_grids'] = [(io_in.to(device), io_out.to(device)) for io_in, io_out in t['io_grids']]
+    t['test_in'] = t['test_in'].to(device)
+    t['test_out'] = t['test_out'].to(device)
+    t['desc_tokens'] = {k: v.to(device) for k, v in t['desc_tokens'].items()}
+
+    return t
+
+
 def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, print_every=20, save_every=200,
           plot_every=100, eval_dataset=None, checkpoint=None):
     """train pytorch classifier model"""
 
     model.train()
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(ignore_index=NO_PRED_VAL)
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=learning_rate,
                                  weight_decay=1e-5)
@@ -77,18 +89,14 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
         epoch_losses = checkpoint['epoch_losses']
 
     batch_losses, validation_losses = [], []
+    num_iter = 0
     for epoch in range(starting_epoch, num_epochs):
         running_loss = 0
         epoch_loss = 0
         for i, batch_data in enumerate(train_loader):
+            batch_data = data_to_device(batch_data, DEVICE)
             pred_output = model(**batch_data)
             test_output = batch_data['test_out']
-
-            # TODO: redo logic with multiple batches
-            # # reshape so only care about grid that is of correct size
-            # test_h, test_w = [i.item() for i in data['output_size']]
-            # test_output = test_output[:, :test_h, :test_w]
-            # pred_output = pred_output[:, :, :test_h, :test_w]
 
             # propogate loss
             optimizer.zero_grad()
@@ -96,16 +104,16 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
             loss.backward()
             optimizer.step()
 
-            batch_losses.append((loss / pred_output.shape[0]).detach().numpy())    # mean loss
+            batch_losses.append((loss / pred_output.shape[0]).cpu().detach().numpy())    # mean loss
             running_loss += loss
-            epoch_loss += loss
+            epoch_loss += loss.item()
 
             # print, save, plot
-            if i % print_every == 0 and i != 0:
-                print(f'epoch {epoch}.{i}:\trunning loss: {round(float(running_loss), 4)}')
+            if num_iter % print_every == 0 and num_iter != 0:
+                print(f'iter {num_iter}:\trunning loss: {round(float(running_loss), 4)}')
                 running_loss = 0
 
-            if save_every is not None and i % save_every == 0:
+            if save_every is not None and num_iter % save_every == 0:
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
@@ -113,7 +121,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
                     'epoch_losses': epoch_losses
                 }, 'model.pt')
 
-            if plot_every is not None and i % plot_every == 0:
+            if plot_every is not None and num_iter % plot_every == 0:
                 plt.clf()
                 fig, ax = plt.subplots()
                 ax.set(title='loss', xlabel='iteration num', ylabel='loss')
@@ -125,10 +133,12 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
                 ax.legend()
                 plt.savefig('train.png')
 
-                reconstruct_preds(val_preds, f't/{epoch}.{i}')                
+                reconstruct_preds(val_preds, f't/{epoch}.{i}')
+
+            num_iter += 1
 
         # print training loss
-        print(f'epoch {epoch} loss: {round(epoch_loss.item(), 2)}')
+        print(f'epoch {epoch} loss: {round(epoch_loss, 2)}')
 
         torch.save({
             'epoch': epoch,
@@ -137,21 +147,24 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
             'epoch_losses': epoch_losses
         }, 'model.pt')
 
+    print('Done training!')
+
 
 def test(model, dataset):
     """test pytorch classifier model"""
     model.eval()
     test_loader = DataLoader(dataset, collate_fn=larc_collate)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(ignore_index=NO_PRED_VAL)
     losses = []
 
     task_preds = {}
     with torch.no_grad():
         for data in tqdm(test_loader):
+            data = data_to_device(data, DEVICE)
             pred_output = model(**data)
             test_output = data['test_out']
             grid = torch.argmax(pred_output, dim=1).view(30, 30)
-            losses.append((criterion(pred_output, test_output) / pred_output.shape[0]).detach().numpy())
+            losses.append((criterion(pred_output, test_output) / pred_output.shape[0]).cpu().detach().numpy())
 
             # save by task_num, then by desc_id
             for i in range(pred_output.shape[0]):
@@ -177,11 +190,13 @@ def reconstruct_preds(predictions, save_dir):
             img_save_dir = os.path.join(save_dir, str(task_num))
             os.makedirs(img_save_dir, exist_ok=True)
             img_path = os.path.join(img_save_dir, f'{desc_id}.png')
-            show_arc_task([(pred_grid, test_out)], save_dir=img_path, name=str(task_num), show=False)
+
+            show_arc_task([(pred_grid.cpu(), test_out)], save_dir=img_path, name=str(task_num), show=False)
 
 
 if __name__ == '__main__':
     from larc_dataset import LARCDataset, larc_collate
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # ===================
     # test shapes correct
@@ -190,14 +205,17 @@ if __name__ == '__main__':
     # from transformers import BertTokenizer
     #
     # batch_size = 3
-    # ios = [(torch.zeros((batch_size, 11, 30, 30)), torch.zeros((batch_size, 11, 30, 30))) for _ in range(3)]
-    # test_in = torch.zeros((batch_size, 11, 30, 30))
-    # descriptions = ["flip square and make it blue."] * (batch_size - 1) + ["turn it yellow."]   # to make sure can accept variable description lengths
+    # ios = [(torch.zeros((batch_size, 11, 30, 30), device=DEVICE), torch.zeros((batch_size, 11, 30, 30), device=DEVICE))
+    #        for _ in range(3)]
+    # test_in = torch.zeros((batch_size, 11, 30, 30), device=DEVICE)
+    # descriptions = ["flip square and make it blue."] * (batch_size - 1) + [
+    #     "turn it yellow."]  # to make sure can accept variable description lengths
     #
     # tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    # desc_enc = {k: torch.tensor(v) for k, v in tokenizer.batch_encode_plus(descriptions, padding=True).items()}
+    # desc_enc = {k: torch.tensor(v, device=DEVICE) for k, v in
+    #             tokenizer.batch_encode_plus(descriptions, padding=True).items()}
     #
-    # predictor = PredictGrid()
+    # predictor = PredictGrid().to(DEVICE)
     # res = predictor(ios, test_in, desc_enc)
     # print(res.shape)
 
@@ -205,40 +223,36 @@ if __name__ == '__main__':
     # overfit on tiny dataset
     # =======================
 
-    predictor = PredictGrid()
-    tasks_dir = 'larc'
-    larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[1, 2], resize=(30, 30))
+    # predictor = PredictGrid().to(DEVICE)
+    # tasks_dir = 'larc'
+    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[1, 2], resize=(30, 30))
     # # checkpoint = torch.load('model.pt')
-    checkpoint = None
-    train(predictor, larc_train_dataset, num_epochs=350, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
-          save_every=None, batch_size=2, print_every=1, plot_every=1)
-    # test(predictor, larc_train_dataset)
+    # checkpoint = None
+    # train(predictor, larc_train_dataset, num_epochs=1, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
+    #       save_every=None, batch_size=2, print_every=1, plot_every=10)
+    # with torch.autograd.profiler.profile() as prof:
+    #     test(predictor, larc_train_dataset)
+    # print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
     # =======================
     # create train/test split
     # =======================
 
-    # import numpy as np
-    #
     # np.random.seed(0)
     # tasks = np.arange(400)
     # np.random.shuffle(tasks)
     # train_frac = 0.8
     # train_data, test_data = tasks[:int(400 * train_frac)], tasks[int(400 * train_frac):]
 
-    # =================================
-    # define predictor + dataset, train
-    # =================================
+    # =======================================
+    # define predictor + dataset, train, test
+    # =======================================
 
-    # predictor = PredictGrid()
+    # predictor = PredictGrid().to(DEVICE)
     # tasks_dir = 'larc'
-    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=train_data, max_tasks=200)
-    # train(predictor, larc_train_dataset, num_epochs=50)
-
-    # ==========
-    # test model
-    # ==========
-
-    # test_data = [1]
-    # larc_test_dataset = LARCDataset(tasks_dir, tasks_subset=test_data)
+    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=train_data, resize=(30, 30))
+    # train(predictor, larc_train_dataset, num_epochs=100, eval_dataset=larc_train_dataset,
+    #       save_every=None, batch_size=32, print_every=1, plot_every=10)
+    #
+    # larc_test_dataset = LARCDataset(tasks_dir, tasks_subset=test_data, resize=(30, 30))
     # test(predictor, larc_test_dataset)

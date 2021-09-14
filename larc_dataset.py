@@ -102,8 +102,8 @@ def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, t
 
         # ensure same number IO examples per task (give 1x1 placeholder task)
         if num_ios is not None and len(new_ios) < num_ios:
-            new_ios += [(arc2torch(np.full((1, 1), PAD_VAL)),
-                         arc2torch(np.full((1, 1), PAD_VAL))) for _ in range(num_ios - len(new_ios))]
+            new_ios += [(arc2torch(np.full((30, 30), PAD_VAL)),
+                         arc2torch(np.full((30, 30), PAD_VAL))) for _ in range(num_ios - len(new_ios))]
         new_task['io_grids'] = new_ios
 
         # pad test IO
@@ -193,7 +193,7 @@ class LARCDataset(Dataset):
 
         return self.tasks[idx]
 
-
+import time
 def larc_collate(batch):
     r"""Puts each data field into a tensor with outer dimension batch size"""
 
@@ -226,11 +226,44 @@ def larc_collate(batch):
 
     return {'io_grids': io_grids, 'test_in': test_in, 'test_out': test_out, 'desc_tokens': desc_tokens, 'metadata': metadata}
 
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+desc_tokens_dummy = {k: torch.tensor(v) for k, v in tokenizer.encode_plus(['dummy'], padding=True).items()}
+
+def larc_collate_dummy_language(batch):
+    r"""Puts each data field into a tensor with outer dimension batch size, does not actually encode data (for speed/reference)"""
+    # get all data together
+    io_grids, test_in, test_out, descs, metadata = [([], []), ([], []), ([], [])], [], [], [], []
+    for b in batch:
+
+        # add IO input and output
+        for i in range(3):
+            io_grids[i][0].append(b['io_grids'][i][0])
+            io_grids[i][1].append(b['io_grids'][i][1])
+
+        # add test IO
+        test_in.append(b['test'][0])
+        test_out.append(b['test'][1])
+
+        # add desc tokens
+        descs.append(b['desc']['do_description'])
+
+        # store metadata
+        metadata.append({'num': b['num'], 'desc_id': b['desc_id']})
+
+    # convert to tensors
+    io_grids = [(torch.stack(io_grids[i][0]), torch.stack(io_grids[i][1])) for i in range(3)]
+    test_in = torch.stack(test_in)
+    test_out = torch.stack(test_out)
+    desc_tokens_dummy_loc = {k: torch.stack([v]*len(batch)) for k, v in desc_tokens_dummy.items()}
+    print(desc_tokens_dummy_loc['input_ids'].shape)
+
+    return {'io_grids': io_grids, 'test_in': test_in, 'test_out': test_out, 'desc_tokens': desc_tokens_dummy_loc,
+            'metadata': metadata}
 
 if __name__ == '__main__':
     ds = LARCDataset('larc', max_tasks=6)
 
     from torch.utils.data import DataLoader
-    dl = DataLoader(ds, batch_size=2, collate_fn=larc_collate)
+    dl = DataLoader(ds, batch_size=2, collate_fn=larc_collate_dummy_language)
     for t in dl:
         print(t.keys())
