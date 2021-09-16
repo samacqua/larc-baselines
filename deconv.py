@@ -39,10 +39,10 @@ class PredictGrid(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # --> 5x64
+        # ([(Bx11x30x30, Bx11x30x30), (Bx11x30x30, Bx11x30x30), (Bx11x30x30, Bx11x30x30)], Bx11x30x30, BxNL) --> 5x64
         self.encoder = LARCEncoder()
 
-        # --> 30x30x11
+        # Bx1x64 --> Bx11x30x30
         self.decoder = DeconvNet()
 
 
@@ -50,7 +50,12 @@ class PredictGrid(nn.Module):
 
         # run grids + desc through encoder
         embedding = self.encoder(io_grids, test_in, desc_tokens)
-        embedding = torch.max(embedding, dim=2)[1].view(-1, 1, 8, 8).type(torch.FloatTensor).to(DEVICE)
+
+        # although nice bc it is a nonlinearity, putting it on device is too slow
+        # can't figure out how to get max while keeping result on same device
+        # embedding = torch.max(embedding, dim=2)[1].view(-1, 1, 8, 8).type(torch.FloatTensor).to(DEVICE)
+
+        embedding = torch.sum(embedding, dim=2).view(-1, 1, 8, 8)
 
         # run thru decoder
         pred = self.decoder(embedding)

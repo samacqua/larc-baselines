@@ -16,11 +16,11 @@ def onehot_initialization(a, num_cats):
     return out
 
 
-def arc2torch(grid, num_cats=11):
+def arc2torch(grid, num_cats=11, device='cpu'):
     """assumes grid is numpy array. convert 2-d grid of original arc format to 3-d one-hot encoded tensor"""
     grid = onehot_initialization(grid, num_cats)
     grid = np.rollaxis(grid, 2)
-    return torch.from_numpy(grid).float()
+    return torch.from_numpy(grid).float().to(device)
 
 
 def pad_grid(grid, new_shape, pad_val=PAD_VAL):
@@ -72,7 +72,7 @@ def gen_larc_descs(larc_path, min_suc=0.1, tasks_subset=None):
                        'num': task['num'], 'name': task['name']}
 
 
-def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, tasks_subset=None):
+def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, tasks_subset=None, device='cpu'):
     """
     generate LARC descriptions with more constraints for pytorch format. turns 2-d arc grids to one-hot encoded tensors.
         pads ARC grids, ensures same number example IOs per task.
@@ -97,20 +97,20 @@ def gen_larc_descs_pytorch(larc_path, num_ios=3, resize=(30, 30), min_suc=0.1, t
             io_out_padded = pad_grid(io_out, new_shape=resize) if resize is not None else np.array(io_out)
 
             # make grid one-hot tensor
-            new_ios.append((arc2torch(io_in_padded),
-                            arc2torch(io_out_padded)))
+            new_ios.append((arc2torch(io_in_padded, device=device),
+                            arc2torch(io_out_padded, device=device)))
 
         # ensure same number IO examples per task (give 1x1 placeholder task)
         if num_ios is not None and len(new_ios) < num_ios:
-            new_ios += [(arc2torch(np.full((30, 30), PAD_VAL)),
-                         arc2torch(np.full((30, 30), PAD_VAL))) for _ in range(num_ios - len(new_ios))]
+            new_ios += [(arc2torch(np.full((30, 30), PAD_VAL), device=device),
+                         arc2torch(np.full((30, 30), PAD_VAL), device=device)) for _ in range(num_ios - len(new_ios))]
         new_task['io_grids'] = new_ios
 
         # pad test IO
         new_task['output_size'] = len(larc_pred_task['test'][1]), len(larc_pred_task['test'][1][0])
         test_in, test_out = larc_pred_task['test']
-        new_task['test'] = (arc2torch(np.array(test_in)), torch.tensor(test_out)) if resize is None \
-                      else (arc2torch(pad_grid(test_in, resize)), torch.tensor(pad_grid(test_out, resize)))
+        new_task['test'] = (arc2torch(np.array(test_in), device=device), torch.tensor(test_out, device=device)) if resize is None \
+                      else (arc2torch(pad_grid(test_in, resize), device=device), torch.tensor(pad_grid(test_out, resize), device=device))
 
         yield new_task
 
@@ -163,7 +163,7 @@ class LARCSingleCellDataset(Dataset):
 class LARCDataset(Dataset):
     """dataset for predicting test output grid in LARC dataset."""
 
-    def __init__(self, larc_path, resize=(30,30), num_ios=3, tasks_subset=None, max_tasks=float('inf')):
+    def __init__(self, larc_path, resize=(30,30), num_ios=3, tasks_subset=None, max_tasks=float('inf'), device='cpu'):
         """
         Params:
             larc_path: path to folder with LARC data in it
@@ -176,7 +176,7 @@ class LARCDataset(Dataset):
         self.tasks = []
 
         for i, larc_pred_task in enumerate(gen_larc_descs_pytorch(larc_path, num_ios=num_ios, resize=resize,
-                                                                  min_suc=0.1, tasks_subset=tasks_subset)):
+                                                                  min_suc=0.1, tasks_subset=tasks_subset, device=device)):
 
             # only load max_tasks tasks
             if i >= max_tasks:
@@ -193,11 +193,10 @@ class LARCDataset(Dataset):
 
         return self.tasks[idx]
 
-import time
+
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 def larc_collate(batch):
     r"""Puts each data field into a tensor with outer dimension batch size"""
-
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
     # get all data together
     io_grids, test_in, test_out, descs, metadata = [([], []), ([], []), ([], [])], [], [], [], []
@@ -226,9 +225,7 @@ def larc_collate(batch):
 
     return {'io_grids': io_grids, 'test_in': test_in, 'test_out': test_out, 'desc_tokens': desc_tokens, 'metadata': metadata}
 
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 desc_tokens_dummy = {k: torch.tensor(v) for k, v in tokenizer.encode_plus(['dummy'], padding=True).items()}
-
 def larc_collate_dummy_language(batch):
     r"""Puts each data field into a tensor with outer dimension batch size, does not actually encode data (for speed/reference)"""
     # get all data together
