@@ -63,18 +63,8 @@ class PredictGrid(nn.Module):
         return pred
 
 
-def data_to_device(t, device):
-    """put larc dataset data on given device"""
-    t['io_grids'] = [(io_in.to(device), io_out.to(device)) for io_in, io_out in t['io_grids']]
-    t['test_in'] = t['test_in'].to(device)
-    t['test_out'] = t['test_out'].to(device)
-    t['desc_tokens'] = {k: v.to(device) for k, v in t['desc_tokens'].items()}
-
-    return t
-
-
 def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, print_every=20, save_every=200,
-          plot_every=100, eval_dataset=None, checkpoint=None):
+          plot_every=100, eval_dataset=None, checkpoint=None, device='cpu'):
     """train pytorch classifier model"""
 
     model.train()
@@ -82,7 +72,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=learning_rate,
                                  weight_decay=1e-5)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=larc_collate)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda batch: larc_collate(batch, device=device))    # , num_workers=2, pin_memory=True
 
     # load previous model if provided
     starting_epoch = 0
@@ -99,7 +89,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
         running_loss = 0
         epoch_loss = 0
         for i, batch_data in enumerate(train_loader):
-            batch_data = data_to_device(batch_data, DEVICE)
+
             pred_output = model(**batch_data)
             test_output = batch_data['test_out']
 
@@ -111,7 +101,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
 
             batch_losses.append((loss / pred_output.shape[0]).cpu().detach().numpy())    # mean loss
             running_loss += loss
-            epoch_loss += loss.item()
+            epoch_loss += loss
 
             # print, save, plot
             if num_iter % print_every == 0 and num_iter != 0:
@@ -138,12 +128,13 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
                 ax.legend()
                 plt.savefig('train.png')
 
-                reconstruct_preds(val_preds, f't/{epoch}.{i}')
+                if eval_dataset is not None:
+                    reconstruct_preds(val_preds, f'train/{epoch}.{i}')
 
             num_iter += 1
 
         # print training loss
-        print(f'epoch {epoch} loss: {round(epoch_loss, 2)}')
+        print(f'epoch {epoch} loss: {round(epoch_loss.item(), 2)}')
 
         torch.save({
             'epoch': epoch,
@@ -152,20 +143,17 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
             'epoch_losses': epoch_losses
         }, 'model.pt')
 
-    print('Done training!')
-
 
 def test(model, dataset):
     """test pytorch classifier model"""
     model.eval()
-    test_loader = DataLoader(dataset, collate_fn=larc_collate)
+    test_loader = DataLoader(dataset, collate_fn=lambda batch: larc_collate(batch, device=DEVICE))
     criterion = nn.CrossEntropyLoss(ignore_index=NO_PRED_VAL)
     losses = []
 
     task_preds = {}
     with torch.no_grad():
-        for data in tqdm(test_loader):
-            data = data_to_device(data, DEVICE)
+        for data in test_loader:
             pred_output = model(**data)
             test_output = data['test_out']
             grid = torch.argmax(pred_output, dim=1).view(30, 30)
@@ -230,11 +218,11 @@ if __name__ == '__main__':
 
     # predictor = PredictGrid().to(DEVICE)
     # tasks_dir = 'larc'
-    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[1, 2], resize=(30, 30))
+    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[1], resize=(30, 30))
     # # checkpoint = torch.load('model.pt')
     # checkpoint = None
-    # train(predictor, larc_train_dataset, num_epochs=1, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
-    #       save_every=None, batch_size=2, print_every=1, plot_every=10)
+    # train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
+    #       save_every=None, batch_size=2, print_every=10, plot_every=10, device=DEVICE)
     # with torch.autograd.profiler.profile() as prof:
     #     test(predictor, larc_train_dataset)
     # print(prof.key_averages().table(sort_by="self_cpu_time_total"))
