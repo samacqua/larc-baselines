@@ -8,3 +8,4 @@ plot.png
 temp.pkl
 train.png
 single_cell_pred_old.py
+train/
