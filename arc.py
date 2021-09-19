@@ -5,6 +5,8 @@ import json
 import os
 import torch
 
+ARC_COLORS = ['black', 'blue', 'red', 'green', 'yellow', 'gray', 'purple', 'orange', 'teal', 'brown', 'white', 'lightgray']
+
 def load_arc_ios(num, tasks_dir='larc'):
     """
     load ARC IO examples + test IO from LARC data
@@ -51,8 +53,8 @@ def show_arc_grid(grid, ax=None, save_dir=None, show=False):
     """show/save images of an arc grid"""
     if ax is None:
         fig, ax = plt.subplots()
-    colors = ['black', 'blue', 'red', 'green', 'yellow', 'gray', 'purple', 'orange', 'teal', 'brown', 'white', 'lightgray']
-    colormap = mpl.colors.ListedColormap(colors)
+
+    colormap = mpl.colors.ListedColormap(ARC_COLORS)
     bounds = list(range(12))
     norm = mpl.colors.BoundaryNorm(bounds, colormap.N)
     ax.imshow(grid, cmap=colormap, norm=norm)
