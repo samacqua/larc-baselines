@@ -15,35 +15,52 @@ import pickle
 
 NO_PRED_VAL = 10
 
+def determine_kernel_size(h_in, w_in, h_out, w_out, stride=(1, 1), dilation=(1, 1), padding=(0, 0), output_padding=(0, 0)):
+    """
+    using the formulas:
+        h_out = (h_in−1)*stride[0] - 2*padding[0] + dilation[0]*(kernel_size[0]−1) + output_padding[0]+1
+        w_out = (w_in−1)*stride[1] - 2*padding[1] + dilation[1]*(kernel_size[1]−1) + output_padding[1]+1
+    determine the kernel size to make all the other parameters true
+    """
+    kx = 1 + (h_out -(h_in - 1)*stride[0] + 2*padding[0] - output_padding[0] - 1) / dilation[0]
+    ky = 1 + (w_out - (w_in - 1) * stride[1] + 2 * padding[1] - output_padding[1] - 1) / dilation[1]
+    assert kx.is_integer() and ky.is_integer(), 'size is incompatible. try changing output_padding.'
+    return int(kx), int(ky)
+
 class DeconvNet(nn.Module):
-    def __init__(self):
+    def __init__(self, max_grid_size=(30, 30)):
         super().__init__()
 
-        # h_out = (h_in−1)*stride[0] - 2*padding[0] + dilation[0]*(kernel_size[0]−1) + output_padding[0]+1
-        # w_out = (w_in−1)*stride[1] - 2*padding[1] + dilation[1]*(kernel_size[1]−1) + output_padding[1]+1
+        # get intermediate grid sizes
+        n_conv_t = 3
+        grid_sizes_x = np.linspace(8, max_grid_size[0], n_conv_t+1, dtype=int)
+        grid_sizes_y = np.linspace(8, max_grid_size[1], n_conv_t+1, dtype=int)
 
-        # Bx1x8x8 --> Bx11x30x30
-        self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(1, 11, kernel_size=3),   # Bx1x8x8 --> Bx11x10x10
-            nn.ReLU(),
-            nn.ConvTranspose2d(11, 11, kernel_size=5, stride=2, output_padding=1),  # Bx11x10x10 --> Bx11x24x24
-            nn.ReLU(),
-            nn.ConvTranspose2d(11, 11, kernel_size=7),  # Bx11x24x24 --> Bx11x30x30
-        )
+        # calculate kernel sizes to get correct grid size, make into layers
+        layers = []
+        for i in range(1, 4):
+            kernel_size = determine_kernel_size(grid_sizes_x[i-1], grid_sizes_y[i-1], grid_sizes_x[i], grid_sizes_y[i])
+            in_channels = 1 if i == 1 else 11
+            layers.append(nn.ConvTranspose2d(in_channels, 11, kernel_size=kernel_size))
+            layers.append(nn.ReLU())
+
+        # Bx1x8x8 --> Bx11xWxH
+        self.deconv = nn.Sequential(*layers)
 
     def forward(self, encoding):
-        return self.deconv1(encoding)
+        return self.deconv(encoding)
 
 
 class PredictGrid(nn.Module):
-    def __init__(self):
+    def __init__(self, max_grid_size=(30, 30)):
         super().__init__()
+        self.max_grid_size = max_grid_size
 
-        # ([(Bx11x30x30, Bx11x30x30), (Bx11x30x30, Bx11x30x30), (Bx11x30x30, Bx11x30x30)], Bx11x30x30, BxNL) --> 5x64
-        self.encoder = LARCEncoder()
+        # ([(Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH)], Bx11xWxH, BxNL) --> 5x64
+        self.encoder = LARCEncoder(max_grid_size=max_grid_size)
 
-        # Bx1x64 --> Bx11x30x30
-        self.decoder = DeconvNet()
+        # Bx1x64 --> Bx11xWxH
+        self.decoder = DeconvNet(max_grid_size=max_grid_size)
 
 
     def forward(self, io_grids, test_in, desc_tokens, **_):
@@ -87,7 +104,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
     num_iter = 0
     for epoch in range(starting_epoch, num_epochs):
         running_loss = 0
-        epoch_loss = 0
+        epoch_loss = torch.tensor(0, dtype=torch.float)
         for i, batch_data in enumerate(train_loader):
 
             pred_output = model(**batch_data)
@@ -103,7 +120,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
             running_loss += loss
             epoch_loss += loss
 
-            # print, save, plot
+            # print progress, save model, plot training curve, plot predictions
             if num_iter % print_every == 0 and num_iter != 0:
                 print(f'iter {num_iter}:\trunning loss: {round(float(running_loss), 4)}')
                 running_loss = 0
@@ -156,12 +173,13 @@ def test(model, dataset):
         for data in test_loader:
             pred_output = model(**data)
             test_output = data['test_out']
-            grid = torch.argmax(pred_output, dim=1).view(30, 30)
+
+            grid = torch.argmax(pred_output, dim=1).view(*model.max_grid_size)
             losses.append((criterion(pred_output, test_output) / pred_output.shape[0]).cpu().detach().numpy())
 
             # save by task_num, then by desc_id
             for i in range(pred_output.shape[0]):
-                task_preds.setdefault(data['metadata'][i]['num'], {})[data['metadata'][i]['desc_id']] = grid
+                task_preds.setdefault(data['metadata'][i]['num'], {})[data['metadata'][i]['desc_id']] = (grid, test_output[0].cpu().detach().numpy())
 
     # save inference results
     with open('temp.pkl', 'wb') as f:
@@ -173,22 +191,24 @@ def test(model, dataset):
 def reconstruct_preds(predictions, save_dir):
     """reconstruct each task"""
     for task_num, pred_grids in predictions.items():
-        ex_ios, (test_in, test_out) = load_arc_ios(task_num)
-        test_h, test_w = len(test_out), len(test_out[0])
 
-        for desc_id, pred_grid in pred_grids.items():
-            pred_grid = pred_grid[:test_h, :test_w]  # only show correct dimensions
+        for desc_id, (pred_grid, gt_grid) in pred_grids.items():
+
+            h = next(i for i in range(gt_grid.shape[0]) if gt_grid[i][0] == NO_PRED_VAL)
+            w = next(i for i in range(gt_grid.shape[1]) if gt_grid[0][i] == NO_PRED_VAL)
+            pred_grid = pred_grid[:h, :w]  # only show correct dimensions
+            gt_grid = gt_grid[:h, :w]
 
             # plot prediction vs. ground truth
             img_save_dir = os.path.join(save_dir, str(task_num))
             os.makedirs(img_save_dir, exist_ok=True)
             img_path = os.path.join(img_save_dir, f'{desc_id}.png')
 
-            show_arc_task([(pred_grid.cpu(), test_out)], save_dir=img_path, name=str(task_num), show=False)
+            show_arc_task([(pred_grid, gt_grid)], save_dir=img_path, name=str(task_num), show=False)
 
 
 if __name__ == '__main__':
-    from larc_dataset import LARCDataset, larc_collate
+    from larc_dataset import LARCDataset, BabyLARCDataset, larc_collate
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # ===================
@@ -197,10 +217,11 @@ if __name__ == '__main__':
 
     # from transformers import BertTokenizer
     #
-    # batch_size = 3
-    # ios = [(torch.zeros((batch_size, 11, 30, 30), device=DEVICE), torch.zeros((batch_size, 11, 30, 30), device=DEVICE))
+    # batch_size = 1
+    # grid_x, grid_y = 10, 10
+    # ios = [(torch.zeros((batch_size, 11, grid_x, grid_y), device=DEVICE), torch.zeros((batch_size, 11, grid_x, grid_y), device=DEVICE))
     #        for _ in range(3)]
-    # test_in = torch.zeros((batch_size, 11, 30, 30), device=DEVICE)
+    # test_in = torch.zeros((batch_size, 11, grid_x, grid_y), device=DEVICE)
     # descriptions = ["flip square and make it blue."] * (batch_size - 1) + [
     #     "turn it yellow."]  # to make sure can accept variable description lengths
     #
@@ -208,21 +229,41 @@ if __name__ == '__main__':
     # desc_enc = {k: torch.tensor(v, device=DEVICE) for k, v in
     #             tokenizer.batch_encode_plus(descriptions, padding=True).items()}
     #
-    # predictor = PredictGrid().to(DEVICE)
+    # predictor = PredictGrid(max_grid_size=(grid_x, grid_y)).to(DEVICE)
     # res = predictor(ios, test_in, desc_enc)
     # print(res.shape)
+
+    # ========================
+    # overfit on identity task
+    # ========================
+
+    from baby_larc import Identity
+
+    grid_size = 10, 10
+    predictor = PredictGrid(max_grid_size=grid_size).to(DEVICE)
+    larc_train_dataset = BabyLARCDataset(max_tasks=1, max_grid_size=grid_size, task_kinds=(Identity,), seed=0)
+
+    checkpoint = torch.load('model.pt')
+    # checkpoint = None
+    train(predictor, larc_train_dataset, num_epochs=400, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
+          save_every=20, batch_size=1, print_every=10, plot_every=10, device=DEVICE, learning_rate=1e-4)
+    # with torch.autograd.profiler.profile() as prof:
+    #     test(predictor, larc_train_dataset)
+    # print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
     # =======================
     # overfit on tiny dataset
     # =======================
 
-    # predictor = PredictGrid().to(DEVICE)
+    # grid_size = 10, 10
+    # predictor = PredictGrid(max_grid_size=grid_size).to(DEVICE)
     # tasks_dir = 'larc'
-    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[1], resize=(30, 30))
-    # # checkpoint = torch.load('model.pt')
-    # checkpoint = None
+    # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[9], max_size=grid_size)
+    #
+    # checkpoint = torch.load('model.pt')
+    # # checkpoint = None
     # train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
-    #       save_every=None, batch_size=2, print_every=10, plot_every=10, device=DEVICE)
+    #       save_every=20, batch_size=1, print_every=10, plot_every=10, device=DEVICE, learning_rate=1e-3)
     # with torch.autograd.profiler.profile() as prof:
     #     test(predictor, larc_train_dataset)
     # print(prof.key_averages().table(sort_by="self_cpu_time_total"))

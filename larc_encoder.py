@@ -11,18 +11,24 @@ class LARCEncoder(nn.Module):
         - better way to handle different grid sizes than padding with special token
         - make LM changeable at initialization
     """
-    def __init__(self):
+
+    def __init__(self, max_grid_size=(30, 30)):
         super().__init__()
 
+        # h_out = (h_in + 2*padding[0] - dilation[0]*(kernel_size[0]−1) - 1) / stride[0] + 1
+        # w_out = (w_in + 2*padding[1] - dilation[1]*(kernel_size[1]−1) - 1) / stride[1] + 1
+
         # grid encoder
-        # Bx30x30x11 --> Bx256
+        # BxWxHx11 --> Bx256
+        linear_input_size = 64 * max_grid_size[0] * max_grid_size[1]
         self.encoder = nn.Sequential(
-            nn.Conv2d(11, 16, 3, stride=2, padding=1),
+            nn.Conv2d(11, 16, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, 3, stride=2, padding=1),
+            nn.Conv2d(16, 32, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 7),
+            nn.Conv2d(32, 64, 5, padding=2),
             nn.Flatten(),
+            nn.Linear(linear_input_size, 256)
         )
 
         # input vs. output embedding
@@ -85,3 +91,23 @@ class LARCEncoder(nn.Module):
         t_out = self.transformer(t_in)
 
         return t_out
+
+if __name__ == '__main__':
+    from transformers import BertTokenizer
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    batch_size = 1
+    max_w, max_h = 10, 10
+    ios = [(torch.zeros((batch_size, 11, max_h, max_w), device=DEVICE), torch.zeros((batch_size, 11, max_h, max_w), device=DEVICE))
+           for _ in range(3)]
+    test_in = torch.zeros((batch_size, 11, max_h, max_w), device=DEVICE)
+    descriptions = ["flip square and make it blue."] * (batch_size - 1) + [
+        "turn it yellow."]  # to make sure can accept variable description lengths
+
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    desc_enc = {k: torch.tensor(v, device=DEVICE) for k, v in
+                tokenizer.batch_encode_plus(descriptions, padding=True).items()}
+
+    predictor = LARCEncoder(max_grid_size=(max_w, max_h)).to(DEVICE)
+    res = predictor(ios, test_in, desc_enc)
+    print(res.shape)
