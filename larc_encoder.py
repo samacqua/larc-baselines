@@ -12,11 +12,13 @@ class LARCEncoder(nn.Module):
         - make LM changeable at initialization
     """
 
-    def __init__(self, max_grid_size=(30, 30)):
+    def __init__(self, max_grid_size=(30, 30), num_ios=3, use_nl=True):
         super().__init__()
 
         # h_out = (h_in + 2*padding[0] - dilation[0]*(kernel_size[0]−1) - 1) / stride[0] + 1
         # w_out = (w_in + 2*padding[1] - dilation[1]*(kernel_size[1]−1) - 1) / stride[1] + 1
+
+        self.use_nl = use_nl
 
         # grid encoder
         # BxWxHx11 --> Bx256
@@ -66,11 +68,13 @@ class LARCEncoder(nn.Module):
         )
 
         # transformer
-        # Bx5x64 --> Bx5x64
-        encoder_layer = nn.TransformerEncoderLayer(d_model=5, nhead=5, batch_first=True)
+        # D = num_ios + (1 if use_nl else 0) + 1    (1 is for test input)
+        # BxDx64 --> BxDx64
+        transform_dimension = num_ios + int(use_nl) + 1
+        encoder_layer = nn.TransformerEncoderLayer(d_model=transform_dimension, nhead=transform_dimension, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=6)
 
-    def forward(self, io_grids, test_in, desc_tokens):
+    def forward(self, io_grids, test_in, desc_tokens=None):
         # run grids through encoders
         transformer_input = []
         for io_in, io_out in io_grids:
@@ -84,7 +88,8 @@ class LARCEncoder(nn.Module):
         transformer_input.append(self.test_in_embedding(self.encoder(test_in)))
 
         # run through BERT
-        transformer_input.append(self.bert_resize(self.bert(**desc_tokens)['pooler_output']))
+        if self.use_nl:
+            transformer_input.append(self.bert_resize(self.bert(**desc_tokens)['pooler_output']))
 
         # concatenate all inputs and run through transformer
         t_in = torch.stack(transformer_input).permute(1, 2, 0)

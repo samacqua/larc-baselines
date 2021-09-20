@@ -41,7 +41,7 @@ def pad_grid(grid, new_shape, pad_val=PAD_VAL):
 # =======================
 
 def gen_baby_larc_tasks(task_kinds=(Identity, RecolorGrid, RecolorAllBlocks, RecolorSomeBlocks), max_tasks=100,
-                        min_grid_size=(3, 3), max_grid_size=(10, 10), seed=None):
+                        min_grid_size=(3, 3), max_grid_size=(10, 10), seed=None, num_ios=3):
     """
     generator of easy LARC tasks
     :param task_kinds: the kinds of tasks to generate tasks from
@@ -56,11 +56,13 @@ def gen_baby_larc_tasks(task_kinds=(Identity, RecolorGrid, RecolorAllBlocks, Rec
 
         # create the task, passing correct parameters based on task type
         if task_kind == Identity:
-            task = Identity(num_ios=3, min_grid_size=min_grid_size, max_grid_size=max_grid_size, seed=seed)
+            task = Identity(num_ios=num_ios, min_grid_size=min_grid_size, max_grid_size=max_grid_size, seed=seed)
         else:
             from_color, to_color = choices(range(10), k=2)  # randomly choose colors
-            task = task_kind(num_ios=3, from_color=from_color, to_color=to_color, min_grid_size=min_grid_size,
+            task = task_kind(num_ios=num_ios, from_color=from_color, to_color=to_color, min_grid_size=min_grid_size,
                              max_grid_size=max_grid_size, seed=seed)
+
+        task.show()
 
         # put into same format as actual LARC description
         yield {'io_grids': task.ios, 'test': task.test, 'desc': task.desc, 'desc_id': 'auto', 'num': i, 'name': f'{type(task).__name__} {i}'}
@@ -245,7 +247,7 @@ class BabyLARCDataset(Dataset):
         self.tasks = []
 
         gen_func = lambda: gen_baby_larc_tasks(task_kinds=task_kinds, max_tasks=max_tasks, min_grid_size=min_grid_size,
-                                               max_grid_size=max_grid_size, seed=seed)
+                                               max_grid_size=max_grid_size, seed=seed, num_ios=num_ios)
 
         self.tasks = [t for t in gen_larc_tasks_pytorch(gen_func, num_ios=num_ios, max_size=max_grid_size, device=device)]
 
@@ -264,15 +266,15 @@ class BabyLARCDataset(Dataset):
 # ========================
 
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-def larc_collate(batch, device='cpu'):
+def larc_collate(batch, num_ios=3, device='cpu'):
     r"""Puts each data field into a tensor with outer dimension batch size"""
 
     # get all data together
-    io_grids, test_in, test_out, descs, metadata = [([], []), ([], []), ([], [])], [], [], [], []
+    io_grids, test_in, test_out, descs, metadata = [([], []) for _ in range(num_ios)], [], [], [], []
     for b in batch:
 
         # add IO input and output
-        for i in range(3):
+        for i in range(num_ios):
             io_grids[i][0].append(b['io_grids'][i][0])
             io_grids[i][1].append(b['io_grids'][i][1])
 
@@ -287,7 +289,7 @@ def larc_collate(batch, device='cpu'):
         metadata.append({'num': b['num'], 'desc_id': b['desc_id']})
 
     # convert to tensors
-    io_grids = [(torch.stack(io_grids[i][0]), torch.stack(io_grids[i][1])) for i in range(3)]
+    io_grids = [(torch.stack(io_grids[i][0]), torch.stack(io_grids[i][1])) for i in range(num_ios)]
     test_in = torch.stack(test_in)
     test_out = torch.stack(test_out)
     desc_tokens = {k: torch.tensor(v, device=device) for k, v in tokenizer.batch_encode_plus(descs, padding=True).items()}  # make sure to put tensors to device

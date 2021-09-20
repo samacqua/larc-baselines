@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from arc import show_arc_task, load_arc_ios
+from arc import show_arc_task
 from larc_encoder import LARCEncoder
 
 import os
@@ -52,16 +52,18 @@ class DeconvNet(nn.Module):
 
 
 class PredictGrid(nn.Module):
-    def __init__(self, max_grid_size=(30, 30)):
+    def __init__(self, max_grid_size=(30, 30), num_ios=3, use_nl=True):
         super().__init__()
         self.max_grid_size = max_grid_size
 
-        # ([(Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH)], Bx11xWxH, BxNL) --> 5x64
-        self.encoder = LARCEncoder(max_grid_size=max_grid_size)
+        # D = num_ios + (1 if use_nl else 0) + 1    (1 is for test input)
+        # ([(Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH)], Bx11xWxH, BxNL) --> BxDx64
+        self.encoder = LARCEncoder(max_grid_size=max_grid_size, num_ios=num_ios, use_nl=use_nl)
 
         # Bx1x64 --> Bx11xWxH
         self.decoder = DeconvNet(max_grid_size=max_grid_size)
 
+        self.num_ios = num_ios
 
     def forward(self, io_grids, test_in, desc_tokens, **_):
 
@@ -89,7 +91,10 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=learning_rate,
                                  weight_decay=1e-5)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda batch: larc_collate(batch, device=device))    # , num_workers=2, pin_memory=True
+
+    # , num_workers=2, pin_memory=True
+    train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                              collate_fn=lambda batch: larc_collate(batch, num_ios=model.num_ios, device=device))
 
     # load previous model if provided
     starting_epoch = 0
@@ -164,7 +169,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
 def test(model, dataset):
     """test pytorch classifier model"""
     model.eval()
-    test_loader = DataLoader(dataset, collate_fn=lambda batch: larc_collate(batch, device=DEVICE))
+    test_loader = DataLoader(dataset, collate_fn=lambda batch: larc_collate(batch, num_ios=model.num_ios, device=DEVICE))
     criterion = nn.CrossEntropyLoss(ignore_index=NO_PRED_VAL)
     losses = []
 
@@ -240,13 +245,14 @@ if __name__ == '__main__':
     from baby_larc import Identity
 
     grid_size = 10, 10
-    predictor = PredictGrid(max_grid_size=grid_size).to(DEVICE)
-    larc_train_dataset = BabyLARCDataset(max_tasks=1, max_grid_size=grid_size, task_kinds=(Identity,), seed=0)
+    num_ios = 0
+    predictor = PredictGrid(max_grid_size=grid_size, num_ios=num_ios, use_nl=False).to(DEVICE)
+    larc_train_dataset = BabyLARCDataset(max_tasks=1, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=0)
 
-    checkpoint = torch.load('model.pt')
-    # checkpoint = None
-    train(predictor, larc_train_dataset, num_epochs=400, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
-          save_every=20, batch_size=1, print_every=10, plot_every=10, device=DEVICE, learning_rate=1e-4)
+    # checkpoint = torch.load('model.pt')
+    checkpoint = None
+    train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
+          save_every=20, batch_size=1, print_every=10, plot_every=10, device=DEVICE, learning_rate=1e-3)
     # with torch.autograd.profiler.profile() as prof:
     #     test(predictor, larc_train_dataset)
     # print(prof.key_averages().table(sort_by="self_cpu_time_total"))
