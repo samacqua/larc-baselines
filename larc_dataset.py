@@ -62,7 +62,7 @@ def gen_baby_larc_tasks(task_kinds=(Identity, RecolorGrid, RecolorAllBlocks, Rec
             task = task_kind(num_ios=num_ios, from_color=from_color, to_color=to_color, min_grid_size=min_grid_size,
                              max_grid_size=max_grid_size, seed=seed+i)
 
-        task.show()
+        # task.show()
 
         # put into same format as actual LARC description
         yield {'io_grids': task.ios, 'test': task.test, 'desc': task.desc, 'desc_id': 'auto', 'num': i, 'name': f'{type(task).__name__} {i}'}
