@@ -21,15 +21,27 @@ class LARCEncoder(nn.Module):
 
         self.use_nl = use_nl
 
+        if max_grid_size <= 5:
+            kernel_sizes = [(2,2), (2,2), (3,3)]
+        else:
+            kernel_sizes = [(3,3), (3,3), (5,5)]
+
         # grid encoder
         # BxWxHx11 --> Bx256
         linear_input_size = 64 * max_grid_size[0] * max_grid_size[1]
         self.encoder = nn.Sequential(
-            nn.Conv2d(11, 16, 3, padding=1),
+            nn.Conv2d(11, 16, kernel_sizes[0], padding=1),
+            nn.BatchNorm2d(16),
             nn.ReLU(),
-            nn.Conv2d(16, 32, 3, padding=1),
+
+            nn.Conv2d(16, 32, kernel_sizes[1], padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 5, padding=2),
+
+            nn.Conv2d(32, 64, kernel_sizes[2], padding=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+
             nn.Flatten(),
             nn.Linear(linear_input_size, 256)
         )
@@ -98,6 +110,7 @@ class LARCEncoder(nn.Module):
         t_out = self.transformer(t_in)
 
         return t_out
+
 
 if __name__ == '__main__':
     from transformers import BertTokenizer

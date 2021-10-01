@@ -52,17 +52,21 @@ class DeconvNet(nn.Module):
         for i in range(1, 4):
             kx, ky, px, py = determine_kernel_size(grid_sizes_x[i-1], grid_sizes_y[i-1], grid_sizes_x[i], grid_sizes_y[i])
             in_channels = 1 if i == 1 else 11
-            layers.append(nn.ConvTranspose2d(in_channels, 11, kernel_size=(kx, ky), padding=(px, py)))
-            layers.append(nn.ReLU())
-
+            layers += [nn.ConvTranspose2d(in_channels, 11, kernel_size=(kx, ky), padding=(px, py)),
+                        nn.BatchNorm2d(11),
+                        nn.ReLU()]
             print(f'{grid_sizes_x[i-1]}x{grid_sizes_y[i-1]} to {grid_sizes_x[i]}x{grid_sizes_y[i]}: kernel={kx, ky}, padding={px,py}')
 
         # Bx1x8x8 --> Bx11xWxH
         n_lin_features = 11*max_grid_size[0]*max_grid_size[1]
+        intermediate_size = 4096
         self.deconv = nn.Sequential(*layers,
-                                    nn.ReLU(),
+
                                     nn.Flatten(),
-                                    nn.Linear(n_lin_features, n_lin_features),
+                                    nn.Linear(n_lin_features, intermediate_size),
+                                    nn.ReLU(),
+
+                                    nn.Linear(intermediate_size, n_lin_features),
                                     nn.Unflatten(1, (11, max_grid_size[0], max_grid_size[1])))
 
     def forward(self, encoding):
@@ -258,8 +262,8 @@ if __name__ == '__main__':
     grid_size = 5, 5
     num_ios = 0
     predictor = PredictGrid(max_grid_size=grid_size, num_ios=num_ios, use_nl=False, device=DEVICE).to(DEVICE)
-    larc_train_dataset = BabyLARCDataset(max_tasks=5, min_grid_size=grid_size, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=0)
-    larc_eval_dataset = BabyLARCDataset(max_tasks=3, min_grid_size=grid_size, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=len(larc_train_dataset))
+    larc_train_dataset = BabyLARCDataset(max_tasks=2**10, min_grid_size=grid_size, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=0)
+    larc_eval_dataset = BabyLARCDataset(max_tasks=2**6, min_grid_size=grid_size, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=len(larc_train_dataset))
 
     checkpoint = None
     train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_eval_dataset,
