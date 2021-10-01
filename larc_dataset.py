@@ -56,11 +56,11 @@ def gen_baby_larc_tasks(task_kinds=(Identity, RecolorGrid, RecolorAllBlocks, Rec
 
         # create the task, passing correct parameters based on task type
         if task_kind == Identity:
-            task = Identity(num_ios=num_ios, min_grid_size=min_grid_size, max_grid_size=max_grid_size, seed=seed)
+            task = Identity(num_ios=num_ios, min_grid_size=min_grid_size, max_grid_size=max_grid_size, seed=seed+i)
         else:
             from_color, to_color = choices(range(10), k=2)  # randomly choose colors
             task = task_kind(num_ios=num_ios, from_color=from_color, to_color=to_color, min_grid_size=min_grid_size,
-                             max_grid_size=max_grid_size, seed=seed)
+                             max_grid_size=max_grid_size, seed=seed+i)
 
         task.show()
 
@@ -265,8 +265,12 @@ class BabyLARCDataset(Dataset):
 # collate through datasets
 # ========================
 
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-def larc_collate(batch, num_ios=3, device='cpu'):
+from requests.exceptions import ConnectionError as requests_exception_error
+try:
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+except requests_exception_error:
+    print('No internet connection, cannot load BERT model.')
+def larc_collate(batch, num_ios=3, device='cpu', use_nl=True):
     r"""Puts each data field into a tensor with outer dimension batch size"""
 
     # get all data together
@@ -292,42 +296,12 @@ def larc_collate(batch, num_ios=3, device='cpu'):
     io_grids = [(torch.stack(io_grids[i][0]), torch.stack(io_grids[i][1])) for i in range(num_ios)]
     test_in = torch.stack(test_in)
     test_out = torch.stack(test_out)
-    desc_tokens = {k: torch.tensor(v, device=device) for k, v in tokenizer.batch_encode_plus(descs, padding=True).items()}  # make sure to put tensors to device
+    if use_nl:
+        desc_tokens = {k: torch.tensor(v, device=device) for k, v in tokenizer.batch_encode_plus(descs, padding=True).items()}  # make sure to put tensors to device
+    else:
+        desc_tokens = {}
 
     return {'io_grids': io_grids, 'test_in': test_in, 'test_out': test_out, 'desc_tokens': desc_tokens, 'metadata': metadata}
-
-
-desc_tokens_dummy = {k: torch.tensor(v) for k, v in tokenizer.encode_plus(['dummy'], padding=True).items()}
-def larc_collate_dummy_language(batch):
-    r"""Puts each data field into a tensor with outer dimension batch size, does not actually encode data (for speed/reference)"""
-    # get all data together
-    io_grids, test_in, test_out, descs, metadata = [([], []), ([], []), ([], [])], [], [], [], []
-    for b in batch:
-
-        # add IO input and output
-        for i in range(3):
-            io_grids[i][0].append(b['io_grids'][i][0])
-            io_grids[i][1].append(b['io_grids'][i][1])
-
-        # add test IO
-        test_in.append(b['test'][0])
-        test_out.append(b['test'][1])
-
-        # add desc tokens
-        descs.append(b['desc']['do_description'])
-
-        # store metadata
-        metadata.append({'num': b['num'], 'desc_id': b['desc_id']})
-
-    # convert to tensors
-    io_grids = [(torch.stack(io_grids[i][0]), torch.stack(io_grids[i][1])) for i in range(3)]
-    test_in = torch.stack(test_in)
-    test_out = torch.stack(test_out)
-    desc_tokens_dummy_loc = {k: torch.stack([v]*len(batch)) for k, v in desc_tokens_dummy.items()}
-
-    return {'io_grids': io_grids, 'test_in': test_in, 'test_out': test_out, 'desc_tokens': desc_tokens_dummy_loc,
-            'metadata': metadata}
-
 
 if __name__ == '__main__':
     larc_ds = LARCDataset('larc', max_size=(10, 10), max_tasks=20)

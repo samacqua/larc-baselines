@@ -4,12 +4,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from arc import show_arc_task
+from arc import show_arc_task, load_arc_ios
 from larc_encoder import LARCEncoder
 
 import os
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 import numpy as np
 import pickle
 
@@ -22,10 +21,21 @@ def determine_kernel_size(h_in, w_in, h_out, w_out, stride=(1, 1), dilation=(1, 
         w_out = (w_in−1)*stride[1] - 2*padding[1] + dilation[1]*(kernel_size[1]−1) + output_padding[1]+1
     determine the kernel size to make all the other parameters true
     """
-    kx = 1 + (h_out -(h_in - 1)*stride[0] + 2*padding[0] - output_padding[0] - 1) / dilation[0]
+    kx = 1 + (h_out - (h_in - 1)*stride[0] + 2*padding[0] - output_padding[0] - 1) / dilation[0]
     ky = 1 + (w_out - (w_in - 1) * stride[1] + 2 * padding[1] - output_padding[1] - 1) / dilation[1]
     assert kx.is_integer() and ky.is_integer(), 'size is incompatible. try changing output_padding.'
-    return int(kx), int(ky)
+
+    # kernel size cannot be 0, 0
+    px, py = 0, 0
+    if kx <= 0:
+        px = abs(kx) + 1
+        kx += 2*px
+    if ky <= 0:
+        py = abs(ky) + 1
+        ky += 2 * py
+
+    return int(kx), int(ky), int(px), int(py)
+
 
 class DeconvNet(nn.Module):
     def __init__(self, max_grid_size=(30, 30)):
@@ -38,23 +48,34 @@ class DeconvNet(nn.Module):
 
         # calculate kernel sizes to get correct grid size, make into layers
         layers = []
+        print('Deconv layers:')
         for i in range(1, 4):
-            kernel_size = determine_kernel_size(grid_sizes_x[i-1], grid_sizes_y[i-1], grid_sizes_x[i], grid_sizes_y[i])
+            kx, ky, px, py = determine_kernel_size(grid_sizes_x[i-1], grid_sizes_y[i-1], grid_sizes_x[i], grid_sizes_y[i])
             in_channels = 1 if i == 1 else 11
-            layers.append(nn.ConvTranspose2d(in_channels, 11, kernel_size=kernel_size))
+            layers.append(nn.ConvTranspose2d(in_channels, 11, kernel_size=(kx, ky), padding=(px, py)))
             layers.append(nn.ReLU())
 
+            print(f'{grid_sizes_x[i-1]}x{grid_sizes_y[i-1]} to {grid_sizes_x[i]}x{grid_sizes_y[i]}: kernel={kx, ky}, padding={px,py}')
+
         # Bx1x8x8 --> Bx11xWxH
-        self.deconv = nn.Sequential(*layers)
+        n_lin_features = 11*max_grid_size[0]*max_grid_size[1]
+        self.deconv = nn.Sequential(*layers,
+                                    nn.ReLU(),
+                                    nn.Flatten(),
+                                    nn.Linear(n_lin_features, n_lin_features),
+                                    nn.Unflatten(1, (11, max_grid_size[0], max_grid_size[1])))
 
     def forward(self, encoding):
         return self.deconv(encoding)
 
 
 class PredictGrid(nn.Module):
-    def __init__(self, max_grid_size=(30, 30), num_ios=3, use_nl=True):
+    def __init__(self, max_grid_size=(30, 30), num_ios=3, use_nl=True, device=torch.device('cpu')):
         super().__init__()
         self.max_grid_size = max_grid_size
+        self.use_nl = use_nl
+        self.num_ios = num_ios
+        self.device = device
 
         # D = num_ios + (1 if use_nl else 0) + 1    (1 is for test input)
         # ([(Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH), (Bx11xWxH, Bx11xWxH)], Bx11xWxH, BxNL) --> BxDx64
@@ -62,8 +83,6 @@ class PredictGrid(nn.Module):
 
         # Bx1x64 --> Bx11xWxH
         self.decoder = DeconvNet(max_grid_size=max_grid_size)
-
-        self.num_ios = num_ios
 
     def forward(self, io_grids, test_in, desc_tokens, **_):
 
@@ -82,8 +101,8 @@ class PredictGrid(nn.Module):
         return pred
 
 
-def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, print_every=20, save_every=200,
-          plot_every=100, eval_dataset=None, checkpoint=None, device='cpu'):
+def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, save_every=5,
+          eval_every=1, eval_dataset=None, checkpoint=None):
     """train pytorch classifier model"""
 
     model.train()
@@ -94,7 +113,7 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
 
     # , num_workers=2, pin_memory=True
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
-                              collate_fn=lambda batch: larc_collate(batch, num_ios=model.num_ios, device=device))
+                              collate_fn=lambda batch: larc_collate(batch, num_ios=model.num_ios, device=model.device, use_nl=model.use_nl))
 
     # load previous model if provided
     starting_epoch = 0
@@ -105,12 +124,12 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
         starting_epoch = checkpoint['epoch'] + 1
         epoch_losses = checkpoint['epoch_losses']
 
-    batch_losses, validation_losses = [], []
+    validation_losses = [0] * len(epoch_losses)
     num_iter = 0
     for epoch in range(starting_epoch, num_epochs):
-        running_loss = 0
         epoch_loss = torch.tensor(0, dtype=torch.float)
         for i, batch_data in enumerate(train_loader):
+            # print(i, len(train_loader))
 
             pred_output = model(**batch_data)
             test_output = batch_data['test_out']
@@ -121,55 +140,47 @@ def train(model, train_dataset, num_epochs=5, batch_size=1, learning_rate=1e-3, 
             loss.backward()
             optimizer.step()
 
-            batch_losses.append((loss / pred_output.shape[0]).cpu().detach().numpy())    # mean loss
-            running_loss += loss
             epoch_loss += loss
 
-            # print progress, save model, plot training curve, plot predictions
-            if num_iter % print_every == 0 and num_iter != 0:
-                print(f'iter {num_iter}:\trunning loss: {round(float(running_loss), 4)}')
-                running_loss = 0
+        # print(pred_output[0, :, 8, :])
+        # print(test_output[0, 8, :])
 
-            if save_every is not None and num_iter % save_every == 0:
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch_losses': epoch_losses
-                }, 'model.pt')
-
-            if plot_every is not None and num_iter % plot_every == 0:
-                plt.clf()
-                fig, ax = plt.subplots()
-                ax.set(title='loss', xlabel='iteration num', ylabel='loss')
-                ax.plot(batch_losses, color='b', label='train loss')
-                if eval_dataset is not None:
-                    val_losses, val_preds = test(model, eval_dataset)
-                    validation_losses.append(np.mean(val_losses))
-                    ax.plot([j*plot_every for j in range(len(validation_losses))], validation_losses, 'o', color='orange', label='validation loss')
-                ax.legend()
-                plt.savefig('train.png')
-
-                if eval_dataset is not None:
-                    reconstruct_preds(val_preds, f'train/{epoch}.{i}')
-
-            num_iter += 1
+        epoch_losses.append(epoch_loss.item() / len(train_loader))
 
         # print training loss
-        print(f'epoch {epoch} loss: {round(epoch_loss.item(), 2)}')
+        print(f'epoch {epoch} loss: {round(epoch_losses[-1], 2)}')
 
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'epoch_losses': epoch_losses
-        }, 'model.pt')
+        # save model
+        if save_every is not None and epoch % save_every == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch_losses': epoch_losses
+            }, 'model.pt')
+
+        # plot loss + reconstruct preds
+        if eval_every is not None and num_iter % eval_every == 0:
+            plt.clf()
+            fig, ax = plt.subplots()
+            ax.set(title='loss', xlabel='iteration num', ylabel='loss')
+            ax.plot(epoch_losses, color='b', label='train loss')
+            if eval_dataset is not None:
+                val_losses, val_preds = test(model, eval_dataset)
+                print('validation loss:', round(np.mean(val_losses), 2))
+                validation_losses.append(np.mean(val_losses))
+                ax.plot([j*eval_every for j in range(len(validation_losses))], validation_losses, 'o', color='orange', label='validation loss')
+            ax.legend()
+            plt.savefig('train.png')
+
+            if eval_dataset is not None:
+                reconstruct_preds(val_preds, f'train/{epoch}')
 
 
 def test(model, dataset):
     """test pytorch classifier model"""
     model.eval()
-    test_loader = DataLoader(dataset, collate_fn=lambda batch: larc_collate(batch, num_ios=model.num_ios, device=DEVICE))
+    test_loader = DataLoader(dataset, collate_fn=lambda batch: larc_collate(batch, num_ios=model.num_ios, device=model.device, use_nl=model.use_nl))
     criterion = nn.CrossEntropyLoss(ignore_index=NO_PRED_VAL)
     losses = []
 
@@ -199,8 +210,8 @@ def reconstruct_preds(predictions, save_dir):
 
         for desc_id, (pred_grid, gt_grid) in pred_grids.items():
 
-            h = next(i for i in range(gt_grid.shape[0]) if gt_grid[i][0] == NO_PRED_VAL)
-            w = next(i for i in range(gt_grid.shape[1]) if gt_grid[0][i] == NO_PRED_VAL)
+            h = next((i for i in range(gt_grid.shape[0]) if gt_grid[i][0] == NO_PRED_VAL), gt_grid.shape[0])
+            w = next((i for i in range(gt_grid.shape[1]) if gt_grid[0][i] == NO_PRED_VAL), gt_grid.shape[1])
             pred_grid = pred_grid[:h, :w]  # only show correct dimensions
             gt_grid = gt_grid[:h, :w]
 
@@ -244,32 +255,37 @@ if __name__ == '__main__':
 
     from baby_larc import Identity
 
-    grid_size = 10, 10
+    grid_size = 5, 5
     num_ios = 0
-    predictor = PredictGrid(max_grid_size=grid_size, num_ios=num_ios, use_nl=False).to(DEVICE)
-    larc_train_dataset = BabyLARCDataset(max_tasks=1, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=0)
+    predictor = PredictGrid(max_grid_size=grid_size, num_ios=num_ios, use_nl=False, device=DEVICE).to(DEVICE)
+    larc_train_dataset = BabyLARCDataset(max_tasks=5, min_grid_size=grid_size, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=0)
+    larc_eval_dataset = BabyLARCDataset(max_tasks=3, min_grid_size=grid_size, max_grid_size=grid_size, task_kinds=(Identity,), num_ios=num_ios, seed=len(larc_train_dataset))
 
-    # checkpoint = torch.load('model.pt')
     checkpoint = None
-    train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
-          save_every=20, batch_size=1, print_every=10, plot_every=10, device=DEVICE, learning_rate=1e-3)
-    # with torch.autograd.profiler.profile() as prof:
-    #     test(predictor, larc_train_dataset)
-    # print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+    train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_eval_dataset,
+          save_every=5, batch_size=1, eval_every=1, learning_rate=1e-3)
+    with torch.autograd.profiler.profile() as prof:
+        test(predictor, larc_train_dataset)
+    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
     # =======================
     # overfit on tiny dataset
     # =======================
 
-    # grid_size = 10, 10
-    # predictor = PredictGrid(max_grid_size=grid_size).to(DEVICE)
+    # ios_train, ios_test = load_arc_ios(9, tasks_dir='larc')
+    # show_arc_task(ios_train + [ios_test], show=True)
+
+    # grid_size = 9, 9
+    # use_nl = False
+    # predictor = PredictGrid(max_grid_size=grid_size, num_ios=3, use_nl=use_nl).to(DEVICE)
     # tasks_dir = 'larc'
     # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=[9], max_size=grid_size)
+    # larc_train_dataset.tasks = larc_train_dataset.tasks * 10
     #
-    # checkpoint = torch.load('model.pt')
-    # # checkpoint = None
+    # # checkpoint = torch.load('model.pt')
+    # checkpoint = None
     # train(predictor, larc_train_dataset, num_epochs=100, checkpoint=checkpoint, eval_dataset=larc_train_dataset,
-    #       save_every=20, batch_size=1, print_every=10, plot_every=10, device=DEVICE, learning_rate=1e-3)
+    #       save_every=5, batch_size=1, eval_every=1, learning_rate=1e-3)
     # with torch.autograd.profiler.profile() as prof:
     #     test(predictor, larc_train_dataset)
     # print(prof.key_averages().table(sort_by="self_cpu_time_total"))
@@ -292,7 +308,7 @@ if __name__ == '__main__':
     # tasks_dir = 'larc'
     # larc_train_dataset = LARCDataset(tasks_dir, tasks_subset=train_data, resize=(30, 30))
     # train(predictor, larc_train_dataset, num_epochs=100, eval_dataset=larc_train_dataset,
-    #       save_every=None, batch_size=32, print_every=1, plot_every=10)
+    #       save_every=None, batch_size=32, print_every=1, eval_every=10)
     #
     # larc_test_dataset = LARCDataset(tasks_dir, tasks_subset=test_data, resize=(30, 30))
     # test(predictor, larc_test_dataset)

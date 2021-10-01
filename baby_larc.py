@@ -21,10 +21,10 @@ def place_random_blocks(grid, num_blocks=3, colors=0):
     if isinstance(colors, int):
         colors = [colors] * num_blocks
 
-    ws = np.arange(2, w)
-    w_weights = ws[::-1] ** 2
-    hs = np.arange(2, h)
-    h_weights = hs[::-1] ** 2
+    ws = np.arange(0, w)
+    w_weights = ws[::-1] ** 2 if len(ws) > 1 else [1]
+    hs = np.arange(0, h)
+    h_weights = hs[::-1] ** 2 if len(hs) > 1 else [1]
 
     for i in range(num_blocks):
         xc, yc = np.random.randint(low=(0, 0), high=(h, w))    # randomly choose center
@@ -83,7 +83,6 @@ class Task:
         raise NotImplementedError
 
     def show(self):
-        print(self.desc['do_description'])
         show_arc_task(ios=self.ios + [self.test], show=True)
 
 
@@ -93,7 +92,7 @@ class Identity(Task):
     def __init__(self, num_ios=3, create_fn=None, min_grid_size=(6, 6), max_grid_size=(10, 10), seed=None):
         set_seed(seed)
         if create_fn is None:
-            grid_size = np.random.randint(low=min_grid_size, high=max_grid_size)
+            grid_size = np.random.randint(low=min_grid_size, high=max_grid_size) if max_grid_size > min_grid_size else max_grid_size
             # make grid with random objects of various colors
             create_fn = lambda: place_random_blocks(make_grid(grid_size, color=np.random.randint(10)), num_blocks=3, colors=random.choices(range(10), k=3))
         self.create_fn = create_fn

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import BertModel
 
+
 class LARCEncoder(nn.Module):
     """
     context encoder of LARC task
@@ -60,12 +61,13 @@ class LARCEncoder(nn.Module):
 
         # natural language description encoding
         # BxNL --> Bx64
-        self.bert = BertModel.from_pretrained("bert-base-uncased")
-        self.bert.requires_grad_(False)
-        self.bert_resize = nn.Sequential(
-            nn.Linear(768, 64),
-            nn.ReLU(),
-        )
+        if use_nl:
+            self.bert = BertModel.from_pretrained("bert-base-uncased")
+            self.bert.requires_grad_(False)
+            self.bert_resize = nn.Sequential(
+                nn.Linear(768, 64),
+                nn.ReLU(),
+            )
 
         # transformer
         # D = num_ios + (1 if use_nl else 0) + 1    (1 is for test input)
